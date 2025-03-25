@@ -1,3 +1,5 @@
+#include "udpscan.h"
+#include "common.h"
 #include <iostream>
 #include <cstring>
 #include <arpa/inet.h>
@@ -7,122 +9,100 @@
 #include <unistd.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <mutex>
 
 #define TIMEOUT_SEC 2
 
-class UDPScanner
+UDPScanner::UDPScanner(const std::string &ip, int port) : ip_address(ip), port(port) {}
+
+bool UDPScanner::send_udp_packet()
 {
-public:
-    UDPScanner(const std::string &ip, int port) : ip_address(ip), port(port) {}
-
-    bool send_udp_packet()
+    sockaddr_in dest_addr{};
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip_address.c_str(), &dest_addr.sin_addr) <= 0)
     {
-        sockaddr_in dest_addr{};
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(port);
-        if (inet_pton(AF_INET, ip_address.c_str(), &dest_addr.sin_addr) <= 0)
-        {
-            perror("Invalid address/Address not supported");
-            return false;
-        }
-
-        int udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (udp_sock < 0)
-        {
-            perror("UDP socket creation failed");
-            return false;
-        }
-
-        if (sendto(udp_sock, nullptr, 0, 0, reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr)) < 0)
-        {
-            perror("Send failed");
-            close(udp_sock);
-            return false;
-        }
-
-        close(udp_sock);
-        return true;
+        perror("Invalid address/Address not supported");
+        return false;
     }
 
-    void listen_for_icmp()
+    int udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_sock < 0)
     {
-        int icmp_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-        if (icmp_sock < 0)
+        perror("UDP socket creation failed");
+        return false;
+    }
+
+    if (sendto(udp_sock, nullptr, 0, 0, reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr)) < 0)
+    {
+        perror("Send failed");
+        close(udp_sock);
+        return false;
+    }
+
+    close(udp_sock);
+    return true;
+}
+
+void UDPScanner::listen_for_icmp()
+{
+    int icmp_sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (icmp_sock < 0)
+    {
+        perror("Raw socket creation failed (need root privileges?)");
+        return;
+    }
+
+    timeval timeout{TIMEOUT_SEC, 0};
+    setsockopt(icmp_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    char buffer[1024];
+    sockaddr_in source_addr{};
+    socklen_t addr_len = sizeof(source_addr);
+    int recv_len = recvfrom(icmp_sock, buffer, sizeof(buffer), 0, reinterpret_cast<struct sockaddr *>(&source_addr), &addr_len);
+    close(icmp_sock);
+
+    if (recv_len < 0)
+    {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
-            perror("Raw socket creation failed (need root privileges?)");
-            return;
-        }
-
-        timeval timeout{TIMEOUT_SEC, 0};
-        setsockopt(icmp_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
-        char buffer[1024];
-        sockaddr_in source_addr{};
-        socklen_t addr_len = sizeof(source_addr);
-        int recv_len = recvfrom(icmp_sock, buffer, sizeof(buffer), 0, reinterpret_cast<struct sockaddr *>(&source_addr), &addr_len);
-        close(icmp_sock);
-
-        if (recv_len < 0)
-        {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                std::cout << "Port " << port << " on " << ip_address << " is open or filtered (no response)\n";
-            }
-            else
-            {
-                perror("Receive failed");
-            }
+            std::lock_guard<std::mutex> lock(print_mutex);
+            std::cout << ip_address << " " << port << " udp" << " open\n";
         }
         else
         {
-            auto *ip_header = reinterpret_cast<struct iphdr *>(buffer);
-            int ip_header_length = ip_header->ihl * 4;
-
-            if (recv_len < ip_header_length + sizeof(struct icmphdr))
-            {
-                std::cerr << "Received packet too short to contain ICMP header\n";
-                return;
-            }
-
-            auto *icmp_header = reinterpret_cast<struct icmphdr *>(buffer + ip_header_length);
-
-            if (icmp_header->type == 3 && icmp_header->code == 3)
-            {
-                std::cout << "Port " << port << " on " << ip_address << " is closed (ICMP Port Unreachable received)\n";
-            }
-            else
-            {
-                std::cout << "Received unexpected ICMP response (Type: " << icmp_header->type << ", Code: " << icmp_header->code << ")\n";
-            }
+            perror("Receive failed");
         }
     }
-
-    void scan()
+    else
     {
-        if (send_udp_packet())
+        auto *ip_header = reinterpret_cast<struct iphdr *>(buffer);
+        int ip_header_length = ip_header->ihl * 4;
+
+        if (recv_len < ip_header_length + static_cast<int>(sizeof(struct icmphdr)))
         {
-            listen_for_icmp();
+            std::cerr << "Received packet too short to contain ICMP header\n";
+            return;
+        }
+
+        auto *icmp_header = reinterpret_cast<struct icmphdr *>(buffer + ip_header_length);
+
+        std::lock_guard<std::mutex> lock(print_mutex);
+        if (icmp_header->type == 3 && icmp_header->code == 3)
+        {
+            std::cout << ip_address << " " << port << " udp" << " closed\n";
+        }
+        else
+        {
+            std::cout << "Received unexpected ICMP response (Type: " << icmp_header->type << ", Code: " << icmp_header->code << ")\n";
         }
     }
+}
 
-private:
-    std::string ip_address;
-    int port;
-};
-
-int main(int argc, char *argv[])
+void UDPScanner::scan()
 {
-    if (argc != 3)
+    if (send_udp_packet())
     {
-        std::cerr << "Usage: " << argv[0] << " <IP> <port>\n";
-        return EXIT_FAILURE;
+        listen_for_icmp();
     }
-
-    std::string ip = argv[1];
-    int port = std::stoi(argv[2]);
-
-    UDPScanner scanner(ip, port);
-    scanner.scan();
-
-    return EXIT_SUCCESS;
 }

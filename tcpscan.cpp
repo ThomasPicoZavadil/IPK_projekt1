@@ -1,3 +1,5 @@
+#include "tcpscan.h"
+#include "common.h"
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
@@ -8,17 +10,9 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <mutex>
 
 #define TIMEOUT_SEC 2
-
-struct PseudoHeader
-{
-    uint32_t source_ip;
-    uint32_t dest_ip;
-    uint8_t reserved;
-    uint8_t protocol;
-    uint16_t tcp_length;
-};
 
 uint16_t checksum(void *data, int len)
 {
@@ -40,16 +34,7 @@ uint16_t checksum(void *data, int len)
     return ~sum;
 }
 
-class TCPSYNScanner
-{
-public:
-    TCPSYNScanner(const std::string &target_ip, int target_port) : ip(target_ip), port(target_port) {}
-    void scan();
-
-private:
-    std::string ip;
-    int port;
-};
+TCPSYNScanner::TCPSYNScanner(const std::string &target_ip, int target_port) : ip(target_ip), port(target_port) {}
 
 void TCPSYNScanner::scan()
 {
@@ -97,8 +82,10 @@ void TCPSYNScanner::scan()
         exit(EXIT_FAILURE);
     }
 
-    struct timeval timeout = {TIMEOUT_SEC, 0};
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    fd_set readfds;
+    struct timeval timeout;
+    timeout.tv_sec = TIMEOUT_SEC;
+    timeout.tv_usec = 0;
 
     char buffer[1024];
     struct sockaddr_in source_addr;
@@ -110,52 +97,47 @@ void TCPSYNScanner::scan()
 
     while (true)
     {
-        int recv_len = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr *)&source_addr, &addr_len);
-        if (recv_len < 0)
-        {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                if (!response_received)
-                {
-                    // No response, send another packet to verify
-                    if (sendto(sock, packet, sizeof(struct tcphdr), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0)
-                    {
-                        perror("Send failed");
-                        close(sock);
-                        exit(EXIT_FAILURE);
-                    }
+        FD_ZERO(&readfds);
+        FD_SET(sock, &readfds);
 
-                    recv_len = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr *)&source_addr, &addr_len);
-                    if (recv_len < 0)
-                    {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        {
-                            std::cout << "Port " << port << " on " << ip << " is filtered (no response)\n";
-                        }
-                        else
-                        {
-                            perror("Receive failed");
-                        }
-                    }
-                    else
-                    {
-                        response_received = true;
-                    }
-                }
-                else
+        int select_result = select(sock + 1, &readfds, NULL, NULL, &timeout);
+        if (select_result < 0)
+        {
+            perror("Select failed");
+            break;
+        }
+        else if (select_result == 0)
+        {
+            if (!response_received)
+            {
+                // No response, send another packet to verify
+                if (sendto(sock, packet, sizeof(struct tcphdr), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0)
                 {
-                    std::cout << "Port " << port << " on " << ip << " is filtered (no response)\n";
+                    perror("Send failed");
+                    close(sock);
+                    exit(EXIT_FAILURE);
                 }
-                break;
+
+                timeout.tv_sec = TIMEOUT_SEC;
+                timeout.tv_usec = 0;
+                continue;
             }
             else
             {
-                perror("Receive failed");
+                std::lock_guard<std::mutex> lock(print_mutex);
+                std::cout << ip << port << " tcp" << " filtered\n";
                 break;
             }
         }
         else
         {
+            int recv_len = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr *)&source_addr, &addr_len);
+            if (recv_len < 0)
+            {
+                perror("Receive failed");
+                break;
+            }
+
             struct iphdr *ip_header = (struct iphdr *)buffer;
             struct tcphdr *tcp_header = (struct tcphdr *)(buffer + (ip_header->ihl * 4));
 
@@ -178,35 +160,21 @@ void TCPSYNScanner::scan()
         }
     }
 
-    if (port_open)
     {
-        std::cout << "Port " << port << " on " << ip << " is open (SYN-ACK received)\n";
-    }
-    else if (port_closed)
-    {
-        std::cout << "Port " << port << " on " << ip << " is closed (RST received)\n";
-    }
-    else if (!response_received)
-    {
-        std::cout << "Port " << port << " on " << ip << " is filtered (no response)\n";
+        std::lock_guard<std::mutex> lock(print_mutex);
+        if (port_open)
+        {
+            std::cout << ip << " " << port << " tcp" << " open\n";
+        }
+        else if (port_closed)
+        {
+            std::cout << ip << " " << port << " tcp" << " closed\n";
+        }
+        else if (!response_received)
+        {
+            std::cout << ip << " " << port << " tcp" << " filtered\n";
+        }
     }
 
     close(sock);
-}
-
-int main(int argc, char *argv[])
-{
-    if (argc != 3)
-    {
-        std::cerr << "Usage: " << argv[0] << " <IP> <port>\n";
-        return EXIT_FAILURE;
-    }
-
-    std::string ip = argv[1];
-    int port = std::atoi(argv[2]);
-
-    TCPSYNScanner scanner(ip, port);
-    scanner.scan();
-
-    return EXIT_SUCCESS;
 }
