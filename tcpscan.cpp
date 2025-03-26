@@ -11,6 +11,8 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <mutex>
+#include <ifaddrs.h>
+#include <net/if.h>
 
 uint16_t checksum(void *data, int len)
 {
@@ -32,7 +34,7 @@ uint16_t checksum(void *data, int len)
     return ~sum;
 }
 
-TCPSYNScanner::TCPSYNScanner(const std::string &target_ip, int target_port, int timeout_ms) : ip(target_ip), port(target_port), timeout_ms(timeout_ms) {}
+TCPSYNScanner::TCPSYNScanner(const std::string &target_ip, int target_port, int timeout_ms, const std::string &interface) : ip(target_ip), port(target_port), timeout_ms(timeout_ms), interface(interface) {}
 
 void TCPSYNScanner::scan()
 {
@@ -41,6 +43,16 @@ void TCPSYNScanner::scan()
     {
         perror("Raw socket creation failed (need root privileges?)");
         exit(EXIT_FAILURE);
+    }
+
+    if (!interface.empty())
+    {
+        if (setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, interface.c_str(), interface.size()) < 0)
+        {
+            perror("Binding to interface failed");
+            close(sock);
+            exit(EXIT_FAILURE);
+        }
     }
 
     struct sockaddr_in dest_addr{};

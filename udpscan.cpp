@@ -10,10 +10,12 @@
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
 #include <mutex>
+#include <ifaddrs.h>
+#include <net/if.h>
 
 #define TIMEOUT_SEC 2
 
-UDPScanner::UDPScanner(const std::string &ip, int port) : ip_address(ip), port(port) {}
+UDPScanner::UDPScanner(const std::string &ip, int port, const std::string &interface) : ip_address(ip), port(port), interface(interface) {}
 
 bool UDPScanner::send_udp_packet()
 {
@@ -31,6 +33,16 @@ bool UDPScanner::send_udp_packet()
     {
         perror("UDP socket creation failed");
         return false;
+    }
+
+    if (!interface.empty())
+    {
+        if (setsockopt(udp_sock, SOL_SOCKET, SO_BINDTODEVICE, interface.c_str(), interface.size()) < 0)
+        {
+            perror("Binding to interface failed");
+            close(udp_sock);
+            return false;
+        }
     }
 
     if (sendto(udp_sock, nullptr, 0, 0, reinterpret_cast<struct sockaddr *>(&dest_addr), sizeof(dest_addr)) < 0)
@@ -51,6 +63,16 @@ void UDPScanner::listen_for_icmp()
     {
         perror("Raw socket creation failed (need root privileges?)");
         return;
+    }
+
+    if (!interface.empty())
+    {
+        if (setsockopt(icmp_sock, SOL_SOCKET, SO_BINDTODEVICE, interface.c_str(), interface.size()) < 0)
+        {
+            perror("Binding to interface failed");
+            close(icmp_sock);
+            return;
+        }
     }
 
     timeval timeout{TIMEOUT_SEC, 0};

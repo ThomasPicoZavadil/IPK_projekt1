@@ -6,6 +6,7 @@
 #include <mutex>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include "tcpscan.h"
 #include "udpscan.h"
 #define TIMEOUT_MS 5000 // Default timeout in milliseconds
@@ -54,17 +55,43 @@ std::string resolve_domain(const std::string &domain)
     return std::string(ip_str);
 }
 
+void list_active_interfaces()
+{
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr) == -1)
+    {
+        perror("getifaddrs");
+        exit(EXIT_FAILURE);
+    }
+
+    std::cout << "Active interfaces:\n";
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
+    {
+        if (ifa->ifa_addr == nullptr)
+            continue;
+
+        if (ifa->ifa_addr->sa_family == AF_INET)
+        {
+            std::cout << ifa->ifa_name << "\n";
+        }
+    }
+
+    freeifaddrs(ifaddr);
+}
+
 int main(int argc, char *argv[])
 {
-    if (argc < 4)
+    if (argc < 2)
     {
-        std::cerr << "Usage: " << argv[0] << " [--pu port-ranges | --pt port-ranges | -u port-ranges | -t port-ranges] {-w timeout} [hostname | ip-address]\n";
+        list_active_interfaces();
+        std::cerr << "Usage: " << argv[0] << " [-i interface | --interface interface] [--pu port-ranges | --pt port-ranges | -u port-ranges | -t port-ranges] {-w timeout} [hostname | ip-address]\n";
         return EXIT_FAILURE;
     }
 
     std::vector<int> tcp_ports;
     std::vector<int> udp_ports;
     std::string target;
+    std::string interface;
     int timeout = TIMEOUT_MS; // Default timeout in milliseconds
 
     for (int i = 1; i < argc; ++i)
@@ -93,7 +120,7 @@ int main(int argc, char *argv[])
                 return EXIT_FAILURE;
             }
         }
-        else if (strcmp(argv[i], "-w") == 0)
+        else if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--wait") == 0)
         {
             if (i + 1 < argc)
             {
@@ -103,6 +130,18 @@ int main(int argc, char *argv[])
             {
                 std::cerr << "Error: Missing timeout value for -w\n";
                 return EXIT_FAILURE;
+            }
+        }
+        else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interface") == 0)
+        {
+            if (i + 1 >= argc || argv[i + 1][0] == '-')
+            {
+                list_active_interfaces();
+                return EXIT_FAILURE;
+            }
+            else
+            {
+                interface = argv[++i];
             }
         }
         else
@@ -125,9 +164,9 @@ int main(int argc, char *argv[])
     {
         for (int port : tcp_ports)
         {
-            threads.emplace_back([ip_address, port, timeout]()
+            threads.emplace_back([ip_address, port, timeout, interface]()
                                  {
-                TCPSYNScanner scanner(ip_address, port, timeout);
+                TCPSYNScanner scanner(ip_address, port, timeout, interface);
                 scanner.scan(); });
         }
     }
@@ -136,9 +175,9 @@ int main(int argc, char *argv[])
     {
         for (int port : udp_ports)
         {
-            threads.emplace_back([ip_address, port]()
+            threads.emplace_back([ip_address, port, interface]()
                                  {
-                UDPScanner scanner(ip_address, port);
+                UDPScanner scanner(ip_address, port, interface);
                 scanner.scan(); });
         }
     }

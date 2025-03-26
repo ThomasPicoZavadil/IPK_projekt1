@@ -6,7 +6,7 @@
 class UDPScanner
 {
 public:
-    UDPScanner(const std::string &ip, int port);
+    UDPScanner(const std::string &ip, int port, const std::string &interface);
     void scan();
 
 private:
@@ -15,6 +15,7 @@ private:
 
     std::string ip_address;
     int port;
+    std::string interface;
 };
 
 #endif // UDPSCAN_H
