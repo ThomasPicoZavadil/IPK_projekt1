@@ -18,12 +18,13 @@ uint16_t checksum(void *data, int len);
 class TCPSYNScanner
 {
 public:
-    TCPSYNScanner(const std::string &target_ip, int target_port);
+    TCPSYNScanner(const std::string &target_ip, int target_port, int timeout_ms);
     void scan();
 
 private:
     std::string ip;
     int port;
+    int timeout_ms;
 };
 
 #endif // TCPSCAN_H

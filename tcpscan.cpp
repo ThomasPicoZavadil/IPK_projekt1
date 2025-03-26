@@ -12,8 +12,6 @@
 #include <errno.h>
 #include <mutex>
 
-#define TIMEOUT_SEC 2
-
 uint16_t checksum(void *data, int len)
 {
     uint16_t *ptr = (uint16_t *)data;
@@ -34,7 +32,7 @@ uint16_t checksum(void *data, int len)
     return ~sum;
 }
 
-TCPSYNScanner::TCPSYNScanner(const std::string &target_ip, int target_port) : ip(target_ip), port(target_port) {}
+TCPSYNScanner::TCPSYNScanner(const std::string &target_ip, int target_port, int timeout_ms) : ip(target_ip), port(target_port), timeout_ms(timeout_ms) {}
 
 void TCPSYNScanner::scan()
 {
@@ -83,9 +81,9 @@ void TCPSYNScanner::scan()
     }
 
     fd_set readfds;
-    struct timeval timeout;
-    timeout.tv_sec = TIMEOUT_SEC;
-    timeout.tv_usec = 0;
+    struct timeval timeout_val;
+    timeout_val.tv_sec = timeout_ms / 1000;
+    timeout_val.tv_usec = (timeout_ms % 1000) * 1000;
 
     char buffer[1024];
     struct sockaddr_in source_addr;
@@ -94,13 +92,15 @@ void TCPSYNScanner::scan()
     bool response_received = false;
     bool port_open = false;
     bool port_closed = false;
+    bool port_filtered = false;
+    int sent_counter = 0;
 
     while (true)
     {
         FD_ZERO(&readfds);
         FD_SET(sock, &readfds);
 
-        int select_result = select(sock + 1, &readfds, NULL, NULL, &timeout);
+        int select_result = select(sock + 1, &readfds, NULL, NULL, &timeout_val);
         if (select_result < 0)
         {
             perror("Select failed");
@@ -108,7 +108,7 @@ void TCPSYNScanner::scan()
         }
         else if (select_result == 0)
         {
-            if (!response_received)
+            if (!response_received && sent_counter < 1)
             {
                 // No response, send another packet to verify
                 if (sendto(sock, packet, sizeof(struct tcphdr), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0)
@@ -117,15 +117,20 @@ void TCPSYNScanner::scan()
                     close(sock);
                     exit(EXIT_FAILURE);
                 }
-
-                timeout.tv_sec = TIMEOUT_SEC;
-                timeout.tv_usec = 0;
+                sent_counter++;
+                timeout_val.tv_sec = timeout_ms / 1000;
+                timeout_val.tv_usec = (timeout_ms % 1000) * 1000;
                 continue;
+            }
+            else if (sent_counter >= 1)
+            {
+                port_filtered = true;
+                break;
             }
             else
             {
                 std::lock_guard<std::mutex> lock(print_mutex);
-                std::cout << ip << port << " tcp" << " filtered\n";
+                std::cout << ip << " " << port << " tcp" << " filtered\n";
                 break;
             }
         }
@@ -170,7 +175,7 @@ void TCPSYNScanner::scan()
         {
             std::cout << ip << " " << port << " tcp" << " closed\n";
         }
-        else if (!response_received)
+        else if (port_filtered)
         {
             std::cout << ip << " " << port << " tcp" << " filtered\n";
         }

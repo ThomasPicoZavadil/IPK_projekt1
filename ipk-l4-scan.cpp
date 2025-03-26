@@ -4,8 +4,11 @@
 #include <cstring>
 #include <thread>
 #include <mutex>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include "tcpscan.h"
 #include "udpscan.h"
+#define TIMEOUT_MS 5000 // Default timeout in milliseconds
 
 std::mutex print_mutex;
 
@@ -32,6 +35,25 @@ void parse_port_ranges(const std::string &range_str, std::vector<int> &ports)
     }
 }
 
+std::string resolve_domain(const std::string &domain)
+{
+    struct addrinfo hints{}, *res;
+    hints.ai_family = AF_INET;       // IPv4
+    hints.ai_socktype = SOCK_STREAM; // TCP
+
+    if (getaddrinfo(domain.c_str(), nullptr, &hints, &res) != 0)
+    {
+        std::cerr << "Error: Unable to resolve domain name " << domain << "\n";
+        exit(EXIT_FAILURE);
+    }
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &((struct sockaddr_in *)res->ai_addr)->sin_addr, ip_str, sizeof(ip_str));
+    freeaddrinfo(res);
+
+    return std::string(ip_str);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 4)
@@ -43,6 +65,7 @@ int main(int argc, char *argv[])
     std::vector<int> tcp_ports;
     std::vector<int> udp_ports;
     std::string target;
+    int timeout = TIMEOUT_MS; // Default timeout in milliseconds
 
     for (int i = 1; i < argc; ++i)
     {
@@ -74,7 +97,7 @@ int main(int argc, char *argv[])
         {
             if (i + 1 < argc)
             {
-                // int timeout = std::stoi(argv[++i]);
+                timeout = std::stoi(argv[++i]);
             }
             else
             {
@@ -94,15 +117,17 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    std::string ip_address = resolve_domain(target);
+
     std::vector<std::thread> threads;
 
     if (!tcp_ports.empty())
     {
         for (int port : tcp_ports)
         {
-            threads.emplace_back([target, port]()
+            threads.emplace_back([ip_address, port, timeout]()
                                  {
-                TCPSYNScanner scanner(target, port);
+                TCPSYNScanner scanner(ip_address, port, timeout);
                 scanner.scan(); });
         }
     }
@@ -111,9 +136,9 @@ int main(int argc, char *argv[])
     {
         for (int port : udp_ports)
         {
-            threads.emplace_back([target, port]()
+            threads.emplace_back([ip_address, port]()
                                  {
-                UDPScanner scanner(target, port);
+                UDPScanner scanner(ip_address, port);
                 scanner.scan(); });
         }
     }
